@@ -1,4 +1,4 @@
-# T-Lift
+# T-Lift: Simplifying T-SQL Optimization
 
 ```sql
 USE [AdventureWorks2016_EXT]
