@@ -122,10 +122,10 @@ AS
 						--#[
 SELECT *
 FROM sales.SalesOrderDetail sod 
-WHERE						--#if @id IS NOT NULL 
+WHERE							--#if @id IS NOT NULL 
 (							--#-
-@id IS NULL or				--#-
-@id = sod.ProductID			--#if @id IS NOT NULL
+@id IS NULL or						--#-
+@id = sod.ProductID					--#if @id IS NOT NULL
 )							--#-
 						--#]
 ```
@@ -185,7 +185,7 @@ exec sp_executesql @sql, N'@id int', @id
 
 Such a beauty, right? :)
 
-Okay, if you or one of your co-workers has never worked with dynamic T-SQL, that is the reason. 
+Okay, if you or one of your co-workers has never worked with dynamic T-SQL, that is why. 
 
 But we need data. Let's rerun our tests. 
 
@@ -215,14 +215,14 @@ AS
 						--#[ simple3
 SELECT *
 FROM sales.SalesOrderDetail sod 
-WHERE						--#if @id IS NOT NULL OR @orderQty IS NOT NULL
+WHERE							--#if @id IS NOT NULL OR @orderQty IS NOT NULL
 (							--#-
-@id IS NULL or				--#-
-@id = sod.ProductID			--#if @id IS NOT NULL
+@id IS NULL or						--#-
+@id = sod.ProductID					--#if @id IS NOT NULL
 )							--#-
 and							--#if @id IS NOT NULL AND @orderQty IS NOT NULL
-(@orderQty IS NULL OR		--#-
-sod.OrderQty >= @orderQty	--#if @orderQty IS NOT NULL
+(@orderQty IS NULL OR					--#-
+sod.OrderQty >= @orderQty				--#if @orderQty IS NOT NULL
 )							--#-
 						--#]
 ```
