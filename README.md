@@ -6,6 +6,7 @@
 - Some features may be incomplete or subject to change
 - Bugs or unexpected behavior may occur
 - Full stability is not yet guaranteed
+
 We welcome your feedback and contributions to help improve the project!
 
 ### Project Description
@@ -97,7 +98,7 @@ T-SQL is much harder to conquer than many developers are aware of. Sad news.
 
 What is now a possible answer? **Dynamic T-SQL**!
 
-So, how can we do better? The answer lies in Dynamic T-SQL! With dynamic T-SQL, you gain the power to control which parts of your query are visible to the query optimizer, leading to better query optimization. 
+With dynamic T-SQL, you gain the power to control which parts of your query are visible to the query optimizer, leading to better query optimization. 
 
 Is this only our crazy idea? No, most of the *elders-of-the-sql-server-engine* (TM)... come up with this advice. 
 
@@ -122,10 +123,10 @@ AS
 						--#[
 SELECT *
 FROM sales.SalesOrderDetail sod 
-WHERE						--#if @id IS NOT NULL 
+WHERE							--#if @id IS NOT NULL 
 (							--#-
-@id IS NULL or				--#-
-@id = sod.ProductID			--#if @id IS NOT NULL
+@id IS NULL or						--#-
+@id = sod.ProductID					--#if @id IS NOT NULL
 )							--#-
 						--#]
 ```
@@ -185,7 +186,7 @@ exec sp_executesql @sql, N'@id int', @id
 
 Such a beauty, right? :)
 
-Okay, if you or one of your co-workers has never worked with dynamic T-SQL, that is the reason. 
+Okay, if you or one of your co-workers has never worked with dynamic T-SQL, that is why. 
 
 But we need data. Let's rerun our tests. 
 
@@ -215,14 +216,14 @@ AS
 						--#[ simple3
 SELECT *
 FROM sales.SalesOrderDetail sod 
-WHERE						--#if @id IS NOT NULL OR @orderQty IS NOT NULL
+WHERE							--#if @id IS NOT NULL OR @orderQty IS NOT NULL
 (							--#-
-@id IS NULL or				--#-
-@id = sod.ProductID			--#if @id IS NOT NULL
+@id IS NULL or						--#-
+@id = sod.ProductID					--#if @id IS NOT NULL
 )							--#-
 and							--#if @id IS NOT NULL AND @orderQty IS NOT NULL
-(@orderQty IS NULL OR		--#-
-sod.OrderQty >= @orderQty	--#if @orderQty IS NOT NULL
+(@orderQty IS NULL OR					--#-
+sod.OrderQty >= @orderQty				--#if @orderQty IS NOT NULL
 )							--#-
 						--#]
 ```
