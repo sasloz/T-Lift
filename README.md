@@ -9,6 +9,19 @@
 
 We welcome your feedback and contributions to help improve the project!
 
+[Project Description - Short Pitch](#project-description)
+
+[An Introduction](#an-introduction)
+
+[Examples & Basic Syntax](#examples--basic-syntax)
+
+[Installation](#installation)
+
+[Basic Usage](#basic-usage)
+
+[Roadmap](#roadmap)
+
+
 ### Project Description
 
 T-Lift is a precompiler (written in T-SQL) that allows T-SQL developers to easily leverage dynamic T-SQL to create highly optimized query plans without the hassle of writing complex code. Traditional methods of using dynamic T-SQL often involve tedious coding practices that disrupt the development flow in SSMS. T-Lift simplifies this by automatically generating efficient T-SQL from your existing stored procedures, guided by simple directives embedded in T-SQL comments.
@@ -115,6 +128,8 @@ T-Lift will generate (we call this render) a new version of your existing proced
 And how can you control this? With directives hidden in T-SQL comments. This feature empowers you to develop as usual or even take already finished procedures and prepare them for T-Lift, giving you a sense of control and confidence. 
 
 Don't tell, show... okay. 
+
+### Examples & Basic Syntax
 
 ```sql
 CREATE OR ALTER PROCEDURE tlift_demo_very_simple 
@@ -293,7 +308,7 @@ Please use GitHub's precious feedback system.
 ### Installation
 Here's how to get started: grab the code from the main branch and run it in a separate user database of your choice. It's important to note that this should not be the same user database where you have your procedures you want T-Lift to use on. We've spent a lot of time on the feature to ensure it can gather all necessary metadata from other databases. ;)
 
-### Usage
+### Basic Usage
 As we showed in the Introduction but with more parameters:
 ```sql
 declare @dynsql nvarchar(max)
@@ -308,4 +323,4 @@ print @dynsql
 ```
 
 ### Roadmap
-We have so many ideas... 
+We have so many ideas... but first we need to add much more error checks. 
