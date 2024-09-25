@@ -19,6 +19,8 @@ We welcome your feedback and contributions to help improve the project!
 
 [Basic Usage](#basic-usage)
 
+[Using Variables instead of Parameters](#using-variables-instead-of-parameters)
+
 [Roadmap](#roadmap)
 
 
@@ -309,7 +311,7 @@ Please use GitHub's precious feedback system.
 Here's how to get started: grab the code from the main branch and run it in a separate user database of your choice. It's important to note that this should not be the same user database where you have your procedures you want T-Lift to use on. We've spent a lot of time on the feature to ensure it can gather all necessary metadata from other databases. ;)
 
 ### Basic Usage
-As we showed in the Introduction but with more parameters:
+As we showed in the introduction but with more parameters:
 ```sql
 declare @dynsql nvarchar(max)
 exec dbo.sp_tlift 
@@ -321,6 +323,87 @@ exec dbo.sp_tlift
 
 print @dynsql
 ```
+
+You also can ask for help. 
+```sql
+exec dbo.sp_tlift @help=1
+```
+
+### Using Variables instead of Parameters
+You may have noticed, but T-Lift has automatically recognised the parameters of the example procedure. Cool, right? SQL Server is still one of the most informative databases when it comes to metadata. 
+
+But what about using variables instead of parameters in a statement in a procedure? 
+
+**First of all, if you are not aware of it, it is not the same thing!**
+
+And yes, at first glance, T-SQL variables and parameters look identical. Both start with that funny @, have to be declared with a type, etc. 
+
+But when it comes to the use of variables by the Query Optimizer, things look really bleak, as it cannot see and evaluate them at all due to the way it works.
+
+However. T-Lift also helps here, because if you work with dynamic T-SQL, the Query Optimizer is also able to evaluate the passed variables when sp_executesql is called. 
+
+But, why we have to talk about variables hier in an extra section? The reason for this is that we unfortunately cannot access the variables used in a procedure as easily as we can access the parameters. And T-Lift does not (yet...) rely on a lexer and parser, so we have to help it a little by indicating the use of variables with two more directives. 
+
+First of all, when declaring a variable, we have to tell the precompiler that we want to use it later in a dynamic statement. To be clear, this is only necessary for variables that we want to use later in dynamic T-SQL; this does not apply to all others. 
+
+```sql
+--#var
+```
+
+Here are a few examples. As you will have noticed, we currently support a notation with and without initial value assignment. 
+```sql
+DECLARE @customer_name1 varchar(50); --#var
+DECLARE @product_price1 decimal(10,2); --#var
+DECLARE @order_date1 datetime2(3); --#var
+DECLARE @is_active1 bit; --#var
+DECLARE @large_text1 nvarchar(max); --#var
+DECLARE @small_number1 tinyint; --#var
+DECLARE @unique_id1 uniqueidentifier; --#var
+DECLARE @binary_data1 varbinary(100); --#var
+DECLARE @float_value1 float(24); --#var
+DECLARE @customer_name varchar(50) = 'John Doe'; --#var
+DECLARE @product_price decimal(10,2) = 99.99; --#var
+DECLARE @order_date datetime2(3) = GETDATE(); --#var
+DECLARE @is_active bit = 1; --#var
+DECLARE @large_text nvarchar(max) = N'This is a long text...'; --#var
+DECLARE @small_number tinyint = 255; --#var
+DECLARE @unique_id uniqueidentifier = NEWID(); --#var
+DECLARE @binary_data varbinary(100) = 0x1234567890; --#var
+DECLARE @float_value float(24) = 3.14159; --#var
+DECLARE @xml_data xml = '<root><element>Test</element></root>'; --#var
+DECLARE @json_data nvarchar(max) = N'{"key": "value"}'; --#var
+DECLARE @date_only date = '2023-09-17'; --#var
+DECLARE @time_only time(7) = '12:34:56.1234567'; --#var
+DECLARE @money_amount money = $1234.56; --#var
+```
+
+However, it is important to note that we currently only support one variable per declaration and line. If your existing code looks different, you will unfortunately have to adjust it accordingly. 
+```sql
+/* Not supported, yet. */
+DECLARE @v1 INT = 1, @v2 INT = 2 --#var
+
+/* Supported. */
+DECLARE @v1 INT = 1 --#var
+DECLARE @v2 INT = 2 --#var
+```
+
+Okay, that's the first half of the work to use variables. Now we need to specify within the dynamic T-SQL section (Do you remember those brackets with *--#[* and *--#]* ?) that you want to use this particular variable. We do that with this directive here: 
+```sql
+--#usevar @variableName1, @variableName2
+```
+
+Here is a small example of more cohesive code. 
+```sql
+declare @v1 int = 897 --#var
+--#[ Query 4
+select * --#usevar @v1
+from sales.SalesOrderDetail sod 
+where sod.ProductID = @v1 
+--#]
+```
+As you can see, the *--#usevar* directive does not have to be used exactly in the line of use. And, at least we've got this far, you can specify multiple variables separated by a comma. 
+
+
 
 ### Roadmap
 We have so many ideas... but first we need to add much more error checks. 
