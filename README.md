@@ -403,7 +403,8 @@ where sod.ProductID = @v1
 ```
 As you can see, the *--#usevar* directive does not have to be used exactly in the line of use. And, at least we've got this far, you can specify multiple variables separated by a comma. 
 
-
+### Return data using an output parameter
+https://learn.microsoft.com/en-us/sql/relational-databases/stored-procedures/return-data-from-a-stored-procedure?view=sql-server-ver16#return-data-using-an-output-parameter
 
 ### Roadmap
 We have so many ideas... but first we need to add much more error checks. 

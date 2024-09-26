@@ -4,7 +4,7 @@ GO
 
 ALTER PROCEDURE dbo.sp_tlift 
 	@DatabaseName NVARCHAR(128) = NULL,
-	@SchemaName NVARCHAR(128) = 'dbo', -- default schema
+	@SchemaName NVARCHAR(128) = 'dbo',
 	@ProcedureName NVARCHAR(128) = NULL,
 	@ProcedureNameNew NVARCHAR(128) = 'tlift_version_of_your_sproc', -- to make our lives easier.
 	@debugLevel INT = 0,
@@ -23,7 +23,7 @@ DECLARE @ExecutionTime INT;
 
 SET @StartTime = SYSUTCDATETIME();
 
-DECLARE @Version CHAR(5) = '00.43'
+DECLARE @Version CHAR(5) = '00.46'
 
 PRINT ''
 PRINT 'Welcome to T-Lift Version '+ @Version
@@ -139,14 +139,27 @@ CREATE TABLE #ProcText (
 
 -- Construct the dynamic SQL
 SET @SQL = N'
-USE ' + QUOTENAME(@DatabaseName) + ';
+USE ' + QUOTENAME(@DatabaseName) + N';
+WITH ProcDefinition AS (
+    SELECT definition
+    FROM sys.sql_modules sm
+    INNER JOIN sys.objects o ON sm.object_id = o.object_id
+    INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+    WHERE s.name = @SchemaName
+      AND o.name = @ProcedureName
+      AND o.type = ''P''
+)
 INSERT INTO #ProcText (Text)
-EXEC sys.sp_helptext N''' + QUOTENAME(@SchemaName) + '.' + QUOTENAME(@ProcedureName) + ''';
+SELECT value+CHAR(13)+CHAR(10)
+FROM ProcDefinition
+CROSS APPLY STRING_SPLIT(REPLACE(REPLACE(definition, CHAR(13), ''''), CHAR(10), CHAR(13)), CHAR(13));
 ';
 
 -- Execute the dynamic SQL
 BEGIN TRY
-	EXEC sp_executesql @SQL;
+	EXEC sp_executesql @SQL, 
+    N'@SchemaName NVARCHAR(128), @ProcedureName NVARCHAR(128)', 
+    @SchemaName, @ProcedureName;
 END TRY
 BEGIN CATCH
 	PRINT 'Error: '+ ERROR_MESSAGE()
@@ -489,9 +502,9 @@ BEGIN
 							THEN ',' + av.VariableName + ' ' + av.DataType + '(' + CAST(av.Precision AS NVARCHAR) + ',' + CAST(av.Scale AS NVARCHAR) + ')'
 						WHEN av.Precision IS NOT NULL
 							THEN ',' + av.VariableName + ' ' + av.DataType + '(' + CAST(av.Precision AS NVARCHAR) + ')'
-						ELSE ',' + av.VariableName + ' ' + av.DataType
-						END
-					,@variable_string = @variable_string + ',' + av.VariableName
+						ELSE ',' + av.VariableName + ' ' + av.DataType 
+						END + ' OUTPUT'
+					,@variable_string = @variable_string + ',' + av.VariableName + ' OUTPUT'
 				FROM #usedvars uv
 				JOIN #AnnotatedVariables av ON uv.VariableName = av.VariableName;
 
@@ -517,7 +530,10 @@ BEGIN
 				END
 				ELSE
 				BEGIN
-					print '@has_parameters = 1 else...'
+					IF @debugLevel > 2
+					BEGIN
+						print '@has_parameters = 1 else...'
+					END
 					SET @full_parameter_string = @parameter_string;
 					SET @full_variable_string = @variable_string;
 				END
