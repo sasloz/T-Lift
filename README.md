@@ -23,6 +23,8 @@ We welcome your feedback and contributions to help improve the project!
 
 [Roadmap](#roadmap)
 
+[Version log](#version-log)
+
 
 ### Project Description
 
@@ -408,3 +410,7 @@ https://learn.microsoft.com/en-us/sql/relational-databases/stored-procedures/ret
 
 ### Roadmap
 We have so many ideas... but first we need to add much more error checks. 
+
+### Version log
+- 0.43 - First time public on GitHub
+- 0.46 - Replacement of sp_helptext (enough is enough...) & adding support for "output variables"
