@@ -11,6 +11,7 @@ Written entirely in T-SQL. Ships as a single stored procedure (`sp_tlift`).
 - [The Idea](#the-idea-in-a-nutshell-aka-hello-world)
 - [What T-Lift Does](#what-t-lift-does)
 - [Installation](#installation)
+- [Business Context Demos](#business-context-demos)
 - [Basic Usage](#basic-usage)
 - [Quick Start](#quick-start)
 - [Directive Reference](#directive-reference)
@@ -113,6 +114,19 @@ The repository includes a small SQL Server regression harness under `intern_stuf
 5. Inspect `TLift_TestDB.dbo.TestResults` for persisted pass/fail results.
 
 The demo script in `demos/` assumes the same split: `TLift_Engine` hosts `sp_tlift`, and `TLift_TestDB` hosts the procedures being rendered.
+
+---
+
+## Business Context Demos
+
+The folder `demos/business_context/` contains ready-to-run demos for more realistic business workloads:
+
+- B2B order workbench with many optional search filters.
+- Dispatch SLA dashboard with wrapper procedure generation.
+- Receivables risk dashboard with bucket-based plan cache segmentation.
+- Query Store evidence script for comparing T-Lift with `OPTION(RECOMPILE)`.
+
+These examples are meant to show why T-Lift can be useful even though `OPTION(RECOMPILE)` is a valid SQL Server performance tool: for recurring high-frequency business query shapes, dynamic SQL powered by T-Lift can be a valid alternative because it avoids paying compilation CPU on every execution while keeping the source procedure readable. This is not a universal "T-Lift is always faster" claim; it is evidence for workloads where repeated business shapes and compile CPU make plan reuse valuable. The folder also includes `run_business_context_demos.ps1` for running the full demo set without `sqlcmd`.
 
 ---
 
