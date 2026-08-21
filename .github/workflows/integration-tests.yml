@@ -1,0 +1,81 @@
+name: integration-tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: SQL Server ${{ matrix.mssql-tag }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql-tag: [ "2017-latest", "2019-latest", "2022-latest", "2025-latest" ]
+    env:
+      SA_PASSWORD: "TLift!CI2026x"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SQL Server container
+        run: |
+          docker run -d --name mssql \
+            -e ACCEPT_EULA=Y \
+            -e MSSQL_SA_PASSWORD="$SA_PASSWORD" \
+            -e SA_PASSWORD="$SA_PASSWORD" \
+            -p 1433:1433 \
+            mcr.microsoft.com/mssql/server:${{ matrix.mssql-tag }}
+
+      - name: Install sqlcmd
+        run: |
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc > /dev/null
+          curl -sSL "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
+          echo "/opt/mssql-tools18/bin" >> "$GITHUB_PATH"
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 60); do
+            if sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -Q "SELECT 1" > /dev/null 2>&1; then
+              echo "SQL Server is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "SQL Server did not come up in time"
+          docker logs mssql
+          exit 1
+
+      - name: Create test databases
+        run: |
+          sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -b \
+            -Q "CREATE DATABASE TLift_Engine_IT; CREATE DATABASE TLift_Target_IT;"
+
+      - name: Install sp_tlift
+        run: |
+          sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -b -x \
+            -d TLift_Engine_IT -i sp_tlift.sql
+
+      - name: Run integration tests
+        run: |
+          sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -b \
+            -d TLift_Target_IT \
+            -v EngineDatabase=TLift_Engine_IT TargetDatabase=TLift_Target_IT \
+            -i integration_tests/tlift_integration_tests.sql
+
+      - name: Check results
+        run: |
+          sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -W -d TLift_Target_IT \
+            -Q "SET NOCOUNT ON; SELECT Status, COUNT(*) AS Cnt FROM it.TestResults GROUP BY Status;"
+          FAILS=$(sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -h -1 -W -d TLift_Target_IT \
+            -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM it.TestResults WHERE Status = N'FAIL';" | tr -d '[:space:]')
+          echo "FAIL count: $FAILS"
+          if [ "$FAILS" != "0" ]; then
+            sqlcmd -S localhost,1433 -U sa -P "$SA_PASSWORD" -C -W -d TLift_Target_IT \
+              -Q "SET NOCOUNT ON; SELECT TestID, Feature, Scenario, Phase, Detail FROM it.TestResults WHERE Status = N'FAIL' ORDER BY TestID;"
+            exit 1
+          fi

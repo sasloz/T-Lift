@@ -13,6 +13,9 @@ ALTER PROCEDURE dbo.sp_tlift
 	@validateOnly BIT = 0,
 	@includeDebug BIT = 1,
 	@help BIT = 0,
+	@execute BIT = 0,
+	@checkDrift BIT = 0,
+	@suggest BIT = 0,
 	@Result NVARCHAR(MAX) = N'' OUTPUT
 WITH RECOMPILE
 AS
@@ -25,7 +28,7 @@ DECLARE @ExecutionTime INT;
 
 SET @StartTime = SYSUTCDATETIME();
 
-DECLARE @Version CHAR(5) = '01.02'
+DECLARE @Version CHAR(5) = '01.10'
 
 PRINT ''
 PRINT 'Welcome to T-Lift Version '+ @Version
@@ -89,6 +92,14 @@ BEGIN
 	PRINT '''--#branch <suffix> <condition>'' <- Defines a child branch.'
 	PRINT '''--#branch-default <suffix>'' <- Default fallback child.'
 	PRINT ''
+	PRINT 'Safe dynamic sorting:'
+	PRINT '''--#sort <@param>: <col1, col2, ...>'' <- Whitelist-based ORDER BY. Only listed columns (plus their "desc" variants) are accepted; anything else raises an error at runtime.'
+	PRINT ''
+	PRINT 'Lifecycle parameters:'
+	PRINT '@execute = 1     <- Deploy the rendered procedure(s) directly into the target database (drop + create).'
+	PRINT '@checkDrift = 1  <- Scan the target database for rendered procedures whose source changed since rendering (uses the metadata stamp).'
+	PRINT '@suggest = 1     <- Scan a procedure for catch-all patterns (@p IS NULL OR / ISNULL / COALESCE) and suggest T-Lift annotations.'
+	PRINT ''
 	PRINT 'Here an example: '
 	PRINT ''
 	PRINT 'CREATE OR ALTER PROCEDURE tlift_demo_very_simple3 '
@@ -123,12 +134,12 @@ BEGIN
 	RAISERROR('@SchemaName is missing or empty.', 16, 1);
     RETURN;
 END
-IF NULLIF(@ProcedureName, '') IS NULL
+IF @checkDrift = 0 AND NULLIF(@ProcedureName, '') IS NULL
 BEGIN
 	RAISERROR('@ProcedureName is missing or empty.', 16, 1);
     RETURN;
 END
-IF NULLIF(@ProcedureNameNew, '') IS NULL
+IF @checkDrift = 0 AND NULLIF(@ProcedureNameNew, '') IS NULL
 BEGIN
 	RAISERROR('@ProcedureNameNew is missing or empty.', 16, 1);
     RETURN;
@@ -141,6 +152,73 @@ END
 
 
 DECLARE @SQL NVARCHAR(MAX);
+
+-- ===================================================================
+-- Drift check mode (@checkDrift = 1): compare the source hash stored
+-- in each rendered procedure's metadata stamp against the current
+-- hash of its source procedure. Standalone mode - returns one result
+-- set and exits.
+-- ===================================================================
+IF @checkDrift = 1
+BEGIN
+	PRINT 'Drift check mode (@checkDrift = 1): scanning ' + QUOTENAME(@DatabaseName) + ' for T-Lift rendered procedures'
+
+	SET @SQL = N'
+;WITH Rendered AS (
+	SELECT s.name AS RenderedSchema, o.name AS RenderedProcedure, sm.definition
+	FROM ' + QUOTENAME(@DatabaseName) + N'.sys.sql_modules sm
+	INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects o ON o.object_id = sm.object_id
+	INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas s ON s.schema_id = o.schema_id
+	WHERE o.type = ''P''
+	  AND sm.definition LIKE N''/* T-Lift:render%''
+),
+Parsed AS (
+	SELECT r.RenderedSchema, r.RenderedProcedure,
+		x2.v AS SourceSchema, x3.v AS SourceProcedure, x4.v AS StoredHash, x5.v AS RenderedUtc, x1.v AS TLiftVersion
+	FROM Rendered r
+	CROSS APPLY (SELECT k = CHARINDEX(N''TLiftVersion='', r.definition)) k1
+	CROSS APPLY (SELECT v = SUBSTRING(r.definition, k1.k + 13, CHARINDEX(CHAR(13), r.definition + CHAR(13), k1.k) - (k1.k + 13))) x1
+	CROSS APPLY (SELECT k = CHARINDEX(N''SourceSchema='', r.definition)) k2
+	CROSS APPLY (SELECT v = SUBSTRING(r.definition, k2.k + 13, CHARINDEX(CHAR(13), r.definition + CHAR(13), k2.k) - (k2.k + 13))) x2
+	CROSS APPLY (SELECT k = CHARINDEX(N''SourceProc='', r.definition)) k3
+	CROSS APPLY (SELECT v = SUBSTRING(r.definition, k3.k + 11, CHARINDEX(CHAR(13), r.definition + CHAR(13), k3.k) - (k3.k + 11))) x3
+	CROSS APPLY (SELECT k = CHARINDEX(N''SourceHash='', r.definition)) k4
+	CROSS APPLY (SELECT v = SUBSTRING(r.definition, k4.k + 11, CHARINDEX(CHAR(13), r.definition + CHAR(13), k4.k) - (k4.k + 11))) x4
+	CROSS APPLY (SELECT k = CHARINDEX(N''RenderedUtc='', r.definition)) k5
+	CROSS APPLY (SELECT v = SUBSTRING(r.definition, k5.k + 12, CHARINDEX(CHAR(13), r.definition + CHAR(13), k5.k) - (k5.k + 12))) x5
+	WHERE k1.k > 0 AND k2.k > 0 AND k3.k > 0 AND k4.k > 0 AND k5.k > 0
+),
+CurrentHashes AS (
+	SELECT s.name AS SchemaName, o.name AS ProcName,
+		CONVERT(NVARCHAR(70), HASHBYTES(''SHA2_256'', sm.definition), 1) AS CurrentHash
+	FROM ' + QUOTENAME(@DatabaseName) + N'.sys.sql_modules sm
+	INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects o ON o.object_id = sm.object_id
+	INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas s ON s.schema_id = o.schema_id
+	WHERE o.type = ''P''
+)
+SELECT p.RenderedSchema, p.RenderedProcedure, p.SourceSchema, p.SourceProcedure,
+	CASE WHEN ch.ProcName IS NULL THEN N''SOURCE_MISSING''
+		 WHEN ch.CurrentHash = p.StoredHash THEN N''OK''
+		 ELSE N''DRIFT'' END AS DriftStatus,
+	p.StoredHash, ch.CurrentHash, p.RenderedUtc, p.TLiftVersion
+FROM Parsed p
+LEFT JOIN CurrentHashes ch
+	ON ch.SchemaName COLLATE DATABASE_DEFAULT = p.SourceSchema COLLATE DATABASE_DEFAULT
+	AND ch.ProcName COLLATE DATABASE_DEFAULT = p.SourceProcedure COLLATE DATABASE_DEFAULT
+ORDER BY p.RenderedSchema, p.RenderedProcedure;';
+
+	BEGIN TRY
+		EXEC sp_executesql @SQL;
+	END TRY
+	BEGIN CATCH
+		DECLARE @driftErr NVARCHAR(MAX) = ERROR_MESSAGE();
+		RAISERROR('Drift check failed: %s', 16, 1, @driftErr);
+		RETURN;
+	END CATCH
+
+	PRINT 'Drift check complete. Status values: OK (hash matches), DRIFT (source changed since render), SOURCE_MISSING (source procedure not found).'
+	RETURN;
+END
 
 -- ===================================================================
 -- Step 1.1: Verify target procedure exists before processing
@@ -175,6 +253,31 @@ BEGIN
 END
 
 PRINT 'Procedure found: [' + @DatabaseName + '].[' + @SchemaName + '].[' + @ProcedureName + ']';
+
+-- ===================================================================
+-- Compute the source definition hash for the render metadata stamp
+-- (used by @checkDrift to detect stale renders)
+-- ===================================================================
+DECLARE @sourceHash NVARCHAR(70);
+
+SET @SQL = N'
+SELECT @sourceHash = CONVERT(NVARCHAR(70), HASHBYTES(''SHA2_256'', sm.definition), 1)
+FROM ' + QUOTENAME(@DatabaseName) + N'.sys.sql_modules sm
+INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects o ON sm.object_id = o.object_id
+INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas s ON o.schema_id = s.schema_id
+WHERE s.name = @SchemaName
+  AND o.name = @ProcedureName
+  AND o.type = ''P'';';
+
+BEGIN TRY
+	EXEC sp_executesql @SQL,
+		N'@SchemaName NVARCHAR(128), @ProcedureName NVARCHAR(128), @sourceHash NVARCHAR(70) OUTPUT',
+		@SchemaName, @ProcedureName, @sourceHash OUTPUT;
+END TRY
+BEGIN CATCH
+	PRINT 'WARNING: Could not compute source hash (' + ERROR_MESSAGE() + '). The render stamp will carry SourceHash=unknown.';
+	SET @sourceHash = NULL;
+END CATCH
 
 -- ===================================================================
 -- Step 1.4: TRY/CATCH wrapper for the entire processing pipeline
@@ -449,6 +552,7 @@ WHERE Comment IS NOT NULL
 	AND LOWER(TRIM(Comment)) <> 'var'          -- --#var
 	AND LOWER(LEFT(TRIM(Comment), 6)) <> 'usevar' -- --#usevar
 	AND LOWER(LEFT(TRIM(Comment), 7)) <> 'buckets' -- --#buckets
+	AND LOWER(LEFT(TRIM(Comment), 5)) <> 'sort ' -- --#sort
 	AND LOWER(TRIM(Comment)) <> 'recompile' -- --#recompile
 	AND LOWER(LEFT(TRIM(Comment), 6)) <> 'define'  -- --#define
 	AND TRIM(Comment) <> '{-'            -- --#{- removal block open
@@ -537,9 +641,19 @@ END
 DECLARE @Parameters NVARCHAR(MAX) = '';
 DECLARE @Parameters2 NVARCHAR(MAX) = '';
 
--- Dynamic SQL to fetch parameters of the procedure
+-- Dynamic SQL to fetch parameters of the procedure.
+-- Note: the INSERT lives inside the dynamic batch (no INSERT ... EXEC),
+-- so callers may capture sp_tlift's own result sets via INSERT ... EXEC.
 SET @SQL = N'
-SELECT 
+INSERT INTO #parameters (
+    ParameterName
+    ,DataType
+    ,MaxLength
+    ,Precision
+    ,Scale
+    ,IsOutput
+    )
+SELECT
     p.name AS ParameterName,
     t.name AS DataType,
     p.max_length AS MaxLength,
@@ -567,15 +681,7 @@ CREATE TABLE #parameters (
 	,IsOutput BIT
 	);
 
--- Insert the results of the parameter query into the temporary table
-	INSERT INTO #parameters (
-		ParameterName
-		,DataType
-		,MaxLength
-		,Precision
-		,Scale
-		,IsOutput
-		)
+-- Run the parameter query (the INSERT is part of the dynamic batch)
 	EXEC sp_executesql @SQL
 		,N'@SchemaName NVARCHAR(128), @ProcedureName NVARCHAR(128)'
 		,@SchemaName
@@ -620,6 +726,104 @@ SELECT @Parameters = STRING_AGG(ParameterName + ' ' + DataType + CASE
 FROM #parameters;
 
 PRINT 'Got procedures parameters'
+
+-- ===================================================================
+-- Suggestion mode (@suggest = 1): scan for catch-all patterns and
+-- propose T-Lift annotations. Standalone mode - returns one result
+-- set and exits without rendering.
+-- ===================================================================
+IF @suggest = 1
+BEGIN
+	PRINT 'Suggestion mode (@suggest = 1): scanning for catch-all patterns'
+
+	CREATE TABLE #suggestFindings (
+		LineNumber INT NOT NULL,
+		ParameterName NVARCHAR(200) NULL,
+		PatternType NVARCHAR(20) NOT NULL,
+		LineText NVARCHAR(200) NOT NULL,
+		Suggestion NVARCHAR(MAX) NOT NULL
+	);
+
+	-- Pattern 1: classic catch-all "( @p IS NULL OR <predicate> )"
+	INSERT INTO #suggestFindings (LineNumber, ParameterName, PatternType, LineText, Suggestion)
+	SELECT p.LineNumber,
+		x.ParamName,
+		N'CATCH_ALL',
+		LEFT(LTRIM(RTRIM(REPLACE(REPLACE(p.TEXT, CHAR(13), N''), CHAR(10), N''))), 200),
+		CASE WHEN pr.ParameterName IS NOT NULL THEN
+			N'Split the predicate over separate lines and annotate: the ''('' and ''' + x.ParamName
+			+ N' IS NULL OR'' glue lines get --#- ; the real predicate line gets --#if ' + x.ParamName
+			+ N' IS NOT NULL ; the closing '')'' gets --#- . Wrap the statement in --#[ / --#] if it is not already inside a dynamic section.'
+		ELSE
+			N'Looks like a catch-all pattern, but ' + x.ParamName
+			+ N' is not a parameter of this procedure. Review manually (local variables need --#var / --#usevar).'
+		END
+	FROM #ProcText p
+	CROSS APPLY (SELECT isNullPos = CHARINDEX(N' IS NULL OR', UPPER(p.TEXT))) f
+	CROSS APPLY (SELECT prefixText = LEFT(p.TEXT, CASE WHEN f.isNullPos > 1 THEN f.isNullPos - 1 ELSE 0 END)) pre
+	CROSS APPLY (SELECT atPos = CASE WHEN CHARINDEX(N'@', pre.prefixText) > 0
+			THEN LEN(pre.prefixText) - CHARINDEX(N'@', REVERSE(pre.prefixText)) + 1
+			ELSE 0 END) a
+	CROSS APPLY (SELECT ParamName = CASE WHEN a.atPos > 0
+			THEN RTRIM(SUBSTRING(pre.prefixText, a.atPos, f.isNullPos - a.atPos))
+			ELSE NULL END) x
+	LEFT JOIN #parameters pr ON pr.ParameterName = x.ParamName
+	WHERE p.DirectivePos IS NULL
+	  AND f.isNullPos > 1
+	  AND a.atPos > 0
+	  AND LEFT(LTRIM(p.TEXT), 2) <> N'--';
+
+	-- Pattern 2: ISNULL(@p, ...) around a parameter
+	INSERT INTO #suggestFindings (LineNumber, ParameterName, PatternType, LineText, Suggestion)
+	SELECT p.LineNumber,
+		x.ParamName,
+		N'ISNULL',
+		LEFT(LTRIM(RTRIM(REPLACE(REPLACE(p.TEXT, CHAR(13), N''), CHAR(10), N''))), 200),
+		N'ISNULL(' + x.ParamName + N', ...) around a parameter usually hides a catch-all predicate. Consider an optional predicate with --#if '
+			+ x.ParamName + N' IS NOT NULL instead. Review manually - this pattern also appears in harmless assignments.'
+	FROM #ProcText p
+	CROSS APPLY (SELECT pos = CHARINDEX(N'ISNULL(@', UPPER(p.TEXT))) f
+	CROSS APPLY (SELECT tail = SUBSTRING(p.TEXT, f.pos + 7, 200)) t
+	CROSS APPLY (SELECT stopPos = PATINDEX(N'%[^@A-Za-z0-9_#$]%', t.tail + N' ')) sp2
+	CROSS APPLY (SELECT ParamName = LEFT(t.tail, sp2.stopPos - 1)) x
+	WHERE p.DirectivePos IS NULL
+	  AND f.pos > 0
+	  AND LEFT(LTRIM(p.TEXT), 2) <> N'--';
+
+	-- Pattern 3: COALESCE(@p, ...) around a parameter
+	INSERT INTO #suggestFindings (LineNumber, ParameterName, PatternType, LineText, Suggestion)
+	SELECT p.LineNumber,
+		x.ParamName,
+		N'COALESCE',
+		LEFT(LTRIM(RTRIM(REPLACE(REPLACE(p.TEXT, CHAR(13), N''), CHAR(10), N''))), 200),
+		N'COALESCE(' + x.ParamName + N', ...) around a parameter usually hides a catch-all predicate. Consider an optional predicate with --#if '
+			+ x.ParamName + N' IS NOT NULL instead. Review manually - this pattern also appears in harmless assignments.'
+	FROM #ProcText p
+	CROSS APPLY (SELECT pos = CHARINDEX(N'COALESCE(@', UPPER(p.TEXT))) f
+	CROSS APPLY (SELECT tail = SUBSTRING(p.TEXT, f.pos + 9, 200)) t
+	CROSS APPLY (SELECT stopPos = PATINDEX(N'%[^@A-Za-z0-9_#$]%', t.tail + N' ')) sp2
+	CROSS APPLY (SELECT ParamName = LEFT(t.tail, sp2.stopPos - 1)) x
+	WHERE p.DirectivePos IS NULL
+	  AND f.pos > 0
+	  AND LEFT(LTRIM(p.TEXT), 2) <> N'--';
+
+	DECLARE @suggestCount INT;
+	SELECT @suggestCount = COUNT(*) FROM #suggestFindings;
+
+	IF @suggestCount = 0
+		PRINT 'No catch-all patterns detected. Nothing to suggest.';
+	ELSE
+		PRINT 'Found ' + CAST(@suggestCount AS VARCHAR(10)) + ' candidate line(s). See the result set for per-line suggestions.';
+
+	SELECT LineNumber, ParameterName, PatternType, LineText, Suggestion
+	FROM #suggestFindings
+	ORDER BY LineNumber, PatternType;
+
+	DROP TABLE #suggestFindings;
+	DROP TABLE #ProcText;
+	DROP TABLE #parameters;
+	RETURN;
+END
 
 -- Catalog annotated variables
 CREATE TABLE #AnnotatedVariables (
@@ -810,6 +1014,9 @@ END
 -- Setup Buckets feature:
 DECLARE @buckets_statements TABLE (statement NVARCHAR(MAX));
 DECLARE @buckets TABLE (param_name SYSNAME, valuelist NVARCHAR(MAX));
+
+-- Setup Sort whitelist feature (--#sort):
+DECLARE @sort_statements TABLE (statement NVARCHAR(MAX));
 
 -- Named conditions (--#define)
 DECLARE @conditions TABLE (
@@ -1008,6 +1215,105 @@ BEGIN
 				END
 			END
 
+			-- Emit safe ORDER BY whitelist chains (--#sort) before any
+			-- prefixes and before OPTION(RECOMPILE) is appended.
+			IF EXISTS (SELECT 1 FROM @sort_statements)
+			BEGIN
+				DECLARE @invalid_sort_params TABLE (param_name NVARCHAR(128));
+
+				INSERT INTO @invalid_sort_params (param_name)
+				SELECT DISTINCT
+					SUBSTRING(ss.statement, CHARINDEX('@', ss.statement) + 1, CHARINDEX(':', ss.statement) - CHARINDEX('@', ss.statement) - 1)
+				FROM @sort_statements ss
+				WHERE NOT EXISTS (
+					SELECT 1
+					FROM #parameters
+					WHERE ParameterName = '@' + SUBSTRING(ss.statement, CHARINDEX('@', ss.statement) + 1, CHARINDEX(':', ss.statement) - CHARINDEX('@', ss.statement) - 1)
+				)
+				AND NOT EXISTS (
+					SELECT 1
+					FROM #usedvars
+					WHERE VariableName = '@' + SUBSTRING(ss.statement, CHARINDEX('@', ss.statement) + 1, CHARINDEX(':', ss.statement) - CHARINDEX('@', ss.statement) - 1)
+				);
+
+				IF EXISTS (SELECT 1 FROM @invalid_sort_params)
+				BEGIN
+					DECLARE @sort_error NVARCHAR(MAX);
+
+					SELECT @sort_error = 'The following sort parameters are not declared or marked with usevar: ' +
+						STRING_AGG(param_name, ', ') WITHIN GROUP (ORDER BY param_name)
+					FROM @invalid_sort_params;
+
+					RAISERROR(@sort_error, 16, 1);
+					RETURN;
+				END
+
+				DECLARE @sortStmt NVARCHAR(MAX), @sortParam NVARCHAR(130), @sortList NVARCHAR(MAX);
+
+				DECLARE sort_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT statement FROM @sort_statements;
+				OPEN sort_cursor;
+				FETCH NEXT FROM sort_cursor INTO @sortStmt;
+
+				WHILE @@FETCH_STATUS = 0
+				BEGIN
+					SET @sortParam = '@' + SUBSTRING(@sortStmt, CHARINDEX('@', @sortStmt) + 1, CHARINDEX(':', @sortStmt) - CHARINDEX('@', @sortStmt) - 1);
+					SET @sortList = LTRIM(SUBSTRING(@sortStmt, CHARINDEX(':', @sortStmt) + 1, LEN(@sortStmt)));
+
+					DECLARE @sortChain NVARCHAR(MAX) = N'IF ' + @sortParam + N' IS NOT NULL' + @lr + N'BEGIN' + @lr;
+					DECLARE @sortFirst BIT = 1;
+					DECLARE @sortEntry NVARCHAR(256);
+					DECLARE @sortEntryEsc NVARCHAR(512);
+
+					DECLARE sort_entry_cursor CURSOR LOCAL FAST_FORWARD FOR
+						SELECT LTRIM(RTRIM(value)) FROM STRING_SPLIT(@sortList, ',') WHERE LEN(LTRIM(RTRIM(value))) > 0;
+					OPEN sort_entry_cursor;
+					FETCH NEXT FROM sort_entry_cursor INTO @sortEntry;
+
+					WHILE @@FETCH_STATUS = 0
+					BEGIN
+						SET @sortEntryEsc = REPLACE(@sortEntry, '''', '''''');
+
+						SET @sortChain = @sortChain
+							+ CASE WHEN @sortFirst = 1 THEN N'IF ' ELSE N'ELSE IF ' END
+							+ N'LOWER(LTRIM(RTRIM(' + @sortParam + N'))) = N''' + LOWER(@sortEntryEsc) + N''''
+							+ N' set @sql = @sql + '' ORDER BY ' + @sortEntryEsc + N'''+CHAR(13)+CHAR(10)' + @lr;
+						SET @sortFirst = 0;
+
+						IF LOWER(RIGHT(@sortEntry, 5)) <> N' desc'
+							SET @sortChain = @sortChain
+								+ N'ELSE IF LOWER(LTRIM(RTRIM(' + @sortParam + N'))) = N''' + LOWER(@sortEntryEsc) + N' desc'''
+								+ N' set @sql = @sql + '' ORDER BY ' + @sortEntryEsc + N' DESC''+CHAR(13)+CHAR(10)' + @lr;
+
+						FETCH NEXT FROM sort_entry_cursor INTO @sortEntry;
+					END
+
+					CLOSE sort_entry_cursor;
+					DEALLOCATE sort_entry_cursor;
+
+					IF @sortFirst = 1
+					BEGIN
+						RAISERROR('--#sort directive has no columns in its whitelist. Expected: --#sort <@param>: <col1, col2, ...>', 16, 1);
+						RETURN;
+					END
+
+					SET @sortChain = @sortChain
+						+ N'ELSE' + @lr + N'BEGIN' + @lr
+						+ N'RAISERROR(''T-Lift: value of ' + @sortParam + N' is not in the sort whitelist.'', 16, 1)' + @lr
+						+ N'RETURN' + @lr
+						+ N'END' + @lr
+						+ N'END' + @lr;
+
+					SET @s = @s + @sortChain;
+
+					FETCH NEXT FROM sort_cursor INTO @sortStmt;
+				END
+
+				CLOSE sort_cursor;
+				DEALLOCATE sort_cursor;
+
+				DELETE FROM @sort_statements;
+			END
+
 			IF @has_buckets = 1
 			BEGIN
 				IF @debugLevel > 2
@@ -1204,6 +1510,15 @@ BEGIN
 		IF lower(left(@Comment, 7)) = 'buckets'
 		BEGIN
 			INSERT INTO @buckets_statements (statement) VALUES (@Comment);
+			IF @debugLevel > 2
+			BEGIN
+				PRINT @comment
+			END
+		END
+
+		IF lower(left(@Comment, 5)) = 'sort '
+		BEGIN
+			INSERT INTO @sort_statements (statement) VALUES (@Comment);
 			IF @debugLevel > 2
 			BEGIN
 				PRINT @comment
@@ -1460,7 +1775,171 @@ BEGIN
 		+ CAST(@branchCount AS VARCHAR) + ' child procedure(s)';
 END
 
+-- ===================================================================
+-- Render metadata stamp: traceability + drift detection (@checkDrift)
+-- ===================================================================
+DECLARE @renderStamp NVARCHAR(MAX) =
+	  N'/* T-Lift:render' + @lr
+	+ N'TLiftVersion=' + @Version + @lr
+	+ N'SourceSchema=' + @SchemaName + @lr
+	+ N'SourceProc=' + @ProcedureName + @lr
+	+ N'SourceHash=' + ISNULL(@sourceHash, N'unknown') + @lr
+	+ N'RenderedUtc=' + CONVERT(NVARCHAR(33), SYSUTCDATETIME(), 126) + @lr
+	+ N'*/' + @lr;
+
+SET @s = @renderStamp + @s;
+
 SET @Result = @s;
+
+-- ===================================================================
+-- @execute = 1: deploy the rendered output into the target database
+-- ===================================================================
+IF @execute = 1
+BEGIN
+	PRINT 'Deploy mode (@execute = 1): deploying rendered procedure(s) to ' + QUOTENAME(@DatabaseName)
+
+	DECLARE @deployExecProc NVARCHAR(300) = QUOTENAME(@DatabaseName) + N'.sys.sp_executesql';
+	DECLARE @deployTargets TABLE (ProcName SYSNAME);
+
+	INSERT INTO @deployTargets (ProcName) VALUES (@ProcedureNameNew);
+	IF @wrapperMode = 1
+		INSERT INTO @deployTargets (ProcName)
+		SELECT @ProcedureNameNew + Suffix FROM @branches;
+
+	-- Drop existing targets so CREATE PROCEDURE succeeds on re-render
+	DECLARE @deployDropSql NVARCHAR(MAX);
+	SELECT @deployDropSql = STRING_AGG(
+		CONVERT(NVARCHAR(MAX), N'IF OBJECT_ID(N''' + QUOTENAME(@SchemaName) + N'.' + QUOTENAME(ProcName) + N''', N''P'') IS NOT NULL DROP PROCEDURE ' + QUOTENAME(@SchemaName) + N'.' + QUOTENAME(ProcName) + N';'),
+		CHAR(13) + CHAR(10))
+	FROM @deployTargets;
+
+	EXEC @deployExecProc @deployDropSql;
+
+	-- Split the rendered output on standalone GO lines (quote and
+	-- block-comment aware) and execute each batch in the target database.
+	DECLARE @deployBatch NVARCHAR(MAX) = N'';
+	DECLARE @deployLine NVARCHAR(MAX);
+	DECLARE @deployTrimmed NVARCHAR(MAX);
+	DECLARE @deployPos INT = 1;
+	DECLARE @deployLineEnd INT;
+	DECLARE @deployInQuote BIT = 0;
+	DECLARE @deployInBlockComment BIT = 0;
+	DECLARE @deployScanPos INT;
+	DECLARE @deployScanLen INT;
+	DECLARE @deployCh NCHAR(1);
+	DECLARE @deployNextCh NCHAR(1);
+	DECLARE @deployTotalLen INT = LEN(@s);
+
+	WHILE @deployPos <= @deployTotalLen + 1
+	BEGIN
+		SET @deployLineEnd = CHARINDEX(CHAR(10), @s, @deployPos);
+		IF @deployLineEnd = 0
+		BEGIN
+			SET @deployLine = SUBSTRING(@s, @deployPos, @deployTotalLen - @deployPos + 1);
+			SET @deployPos = @deployTotalLen + 2;
+		END
+		ELSE
+		BEGIN
+			SET @deployLine = SUBSTRING(@s, @deployPos, @deployLineEnd - @deployPos + 1);
+			SET @deployPos = @deployLineEnd + 1;
+		END
+
+		SET @deployTrimmed = LTRIM(RTRIM(REPLACE(REPLACE(@deployLine, CHAR(13), N''), CHAR(10), N'')));
+
+		IF @deployInQuote = 0 AND @deployInBlockComment = 0 AND UPPER(@deployTrimmed) = N'GO'
+		BEGIN
+			IF LEN(LTRIM(RTRIM(@deployBatch))) > 0
+			BEGIN
+				EXEC @deployExecProc @deployBatch;
+				SET @deployBatch = N'';
+			END
+		END
+		ELSE
+		BEGIN
+			SET @deployBatch = @deployBatch + @deployLine;
+			SET @deployScanPos = 1;
+			SET @deployScanLen = LEN(@deployLine);
+
+			WHILE @deployScanPos <= @deployScanLen
+			BEGIN
+				SET @deployCh = SUBSTRING(@deployLine, @deployScanPos, 1);
+				SET @deployNextCh = SUBSTRING(@deployLine, @deployScanPos + 1, 1);
+
+				IF @deployInQuote = 1
+				BEGIN
+					IF @deployCh = N''''
+					BEGIN
+						IF @deployNextCh = N''''
+							SET @deployScanPos = @deployScanPos + 2;
+						ELSE
+						BEGIN
+							SET @deployInQuote = 0;
+							SET @deployScanPos = @deployScanPos + 1;
+						END
+					END
+					ELSE
+						SET @deployScanPos = @deployScanPos + 1;
+				END
+				ELSE IF @deployInBlockComment = 1
+				BEGIN
+					IF @deployCh = N'*' AND @deployNextCh = N'/'
+					BEGIN
+						SET @deployInBlockComment = 0;
+						SET @deployScanPos = @deployScanPos + 2;
+					END
+					ELSE
+						SET @deployScanPos = @deployScanPos + 1;
+				END
+				ELSE IF @deployCh = N'-' AND @deployNextCh = N'-'
+					BREAK;
+				ELSE IF @deployCh = N'/' AND @deployNextCh = N'*'
+				BEGIN
+					SET @deployInBlockComment = 1;
+					SET @deployScanPos = @deployScanPos + 2;
+				END
+				ELSE IF @deployCh = N''''
+				BEGIN
+					SET @deployInQuote = 1;
+					SET @deployScanPos = @deployScanPos + 1;
+				END
+				ELSE
+					SET @deployScanPos = @deployScanPos + 1;
+			END
+		END
+	END
+
+	IF LEN(LTRIM(RTRIM(@deployBatch))) > 0
+		EXEC @deployExecProc @deployBatch;
+
+	-- Verify every expected procedure exists after deployment
+	DECLARE @deployMissing NVARCHAR(MAX) = NULL;
+	DECLARE @deployName SYSNAME;
+
+	DECLARE deploy_verify_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT ProcName FROM @deployTargets;
+	OPEN deploy_verify_cursor;
+	FETCH NEXT FROM deploy_verify_cursor INTO @deployName;
+
+	WHILE @@FETCH_STATUS = 0
+	BEGIN
+		IF OBJECT_ID(QUOTENAME(@DatabaseName) + N'.' + QUOTENAME(@SchemaName) + N'.' + QUOTENAME(@deployName), N'P') IS NULL
+			SET @deployMissing = ISNULL(@deployMissing + N', ', N'') + @deployName;
+		FETCH NEXT FROM deploy_verify_cursor INTO @deployName;
+	END
+
+	CLOSE deploy_verify_cursor;
+	DEALLOCATE deploy_verify_cursor;
+
+	IF @deployMissing IS NOT NULL
+	BEGIN
+		DECLARE @deployErr NVARCHAR(MAX) = N'@execute = 1: deployment finished but these procedures were not found afterwards: ' + @deployMissing;
+		RAISERROR(@deployErr, 16, 1);
+		RETURN;
+	END
+
+	DECLARE @deployCount INT;
+	SELECT @deployCount = COUNT(*) FROM @deployTargets;
+	PRINT '@execute: deployed ' + CAST(@deployCount AS VARCHAR(10)) + ' procedure(s) to ' + QUOTENAME(@DatabaseName) + '.' + QUOTENAME(@SchemaName)
+END
 
 END TRY
 BEGIN CATCH

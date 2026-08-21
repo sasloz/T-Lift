@@ -1,5 +1,7 @@
 # T-Lift
 
+[![Integration Tests](https://github.com/sasloz/T-Lift/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/sasloz/T-Lift/actions/workflows/integration-tests.yml)
+
 T-Lift is a T-SQL precompiler that lets developers use directive-based meta-code within stored procedures to generate controlled, dynamic T-SQL. It is designed for teams that understand when and why dynamic SQL helps SQL Server build more *predictable* execution plans, but want a cleaner, safer, and more comfortable way to apply it without hand-crafting dynamic SQL everywhere.
 
 Written entirely in T-SQL. Ships as a single stored procedure (`sp_tlift`).
@@ -10,6 +12,7 @@ Written entirely in T-SQL. Ships as a single stored procedure (`sp_tlift`).
 
 - [The Idea](#the-idea-in-a-nutshell-aka-hello-world)
 - [What T-Lift Does](#what-t-lift-does)
+- [How T-Lift Compares](#how-t-lift-compares)
 - [Installation](#installation)
 - [Business Context Demos](#business-context-demos)
 - [Basic Usage](#basic-usage)
@@ -26,9 +29,13 @@ Written entirely in T-SQL. Ships as a single stored procedure (`sp_tlift`).
   - [Named Conditions](#named-conditions)
   - [Block Removal](#block-removal)
   - [Buckets (Plan Cache Segmentation)](#buckets-plan-cache-segmentation)
+  - [Sort Whitelists (Safe Dynamic ORDER BY)](#sort-whitelists-safe-dynamic-order-by)
 - [Variables vs. Parameters](#variables-vs-parameters)
 - [Wrapper Procedures](#wrapper-procedures)
 - [Validation Mode](#validation-mode)
+- [Deployment and Drift Detection](#deployment-and-drift-detection)
+- [Annotation Suggestions](#annotation-suggestions)
+- [Permissions Note](#permissions-note)
 - [Parameters](#parameters)
 - [Compatibility](#compatibility)
 - [Roadmap](#roadmap)
@@ -79,6 +86,23 @@ The basic idea: you annotate your procedure, T-Lift renders it.
 
 ---
 
+## How T-Lift Compares
+
+Every known answer to the catch-all problem forces a trade-off between readability and plan quality — except one:
+
+| Approach | Plan quality | Compile CPU | Readability / tooling | Maintenance |
+|---|---|---|---|---|
+| Catch-all query (`@p IS NULL OR ...`) | Poor — one plan for every shape | Low | Full SSMS comfort | Low |
+| `OPTION(RECOMPILE)` | Optimal per call | **Paid on every execution** | Full SSMS comfort | Low |
+| Hand-written dynamic SQL | Optimal per shape, plan reuse | Low | Lost — strings, no IntelliSense, injection risk if done sloppily | High |
+| Manually maintained specialized procedures | Optimal per pattern | Low | OK, but near-duplicate code | Very high |
+| PSP optimization (SQL 2022+) | Better, but equality predicates only, limited predicate count | Low | Full comfort | None (but no control) |
+| **T-Lift** | Optimal per shape, plan reuse | Low | **Source stays valid, debuggable T-SQL** | Renders are generated; `@checkDrift` finds stale ones |
+
+A side effect worth calling out: T-Lift **always** emits parameterized `sp_executesql` with a correctly typed parameter list taken from `sys.parameters`. The generated code never concatenates parameter values into the SQL string — which makes it safer than a lot of hand-written dynamic SQL out there.
+
+---
+
 ## Installation
 
 1. Grab `sp_tlift.sql` from this repository.
@@ -114,6 +138,12 @@ The repository includes a small SQL Server regression harness under `intern_stuf
 5. Inspect `TLift_TestDB.dbo.TestResults` for persisted pass/fail results.
 
 The demo script in `demos/` assumes the same split: `TLift_Engine` hosts `sp_tlift`, and `TLift_TestDB` hosts the procedures being rendered.
+
+In addition, `integration_tests/` contains an independent harness (117 assertions covering every directive plus the lifecycle features) that runs on every push via GitHub Actions against SQL Server 2017, 2019, 2022, and 2025 containers. Run it locally with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\integration_tests\run_integration_tests.ps1 -Server localhost -User sa -Password '...'
+```
 
 ---
 
@@ -555,6 +585,49 @@ o.TotalAmount >= @MinAmount                     --#if @MinAmount IS NOT NULL
 
 You can use multiple `--#buckets` directives in the same section for multi-dimensional segmentation.
 
+### Sort Whitelists (Safe Dynamic ORDER BY)
+
+```
+--#sort @param: col1, col2, col3
+```
+
+Dynamic sorting is the second most common reason people hand-write dynamic SQL — and the classic place where SQL injection sneaks in (`ORDER BY ' + @SortCol`). The `--#sort` directive generates a **whitelist-based** ORDER BY: only the listed columns are accepted, everything else raises an error at runtime.
+
+Place the directive on its own line inside a `--#[` / `--#]` section. The parameter must be a procedure parameter (or a variable registered via `--#var` / `--#usevar`).
+
+```sql
+CREATE OR ALTER PROCEDURE dbo.SearchCustomers
+    @City NVARCHAR(50) = NULL,
+    @SortColumn NVARCHAR(50) = NULL
+AS
+                                    --#[ CustSearch
+                                    --#sort @SortColumn: LastName, City
+SELECT c.CustomerID, c.FirstName, c.LastName, c.City
+FROM dbo.Customers c
+WHERE                               --#if @City IS NOT NULL
+c.City = @City                      --#if @City IS NOT NULL
+                                    --#]
+```
+
+For every whitelisted column, T-Lift generates two accepted values: the column name itself (ascending) and the column name plus ` desc` (descending). Matching is case-insensitive and whitespace-tolerant. The rendered code looks like this:
+
+```sql
+IF @SortColumn IS NOT NULL
+BEGIN
+IF LOWER(LTRIM(RTRIM(@SortColumn))) = N'lastname' set @sql = @sql + ' ORDER BY LastName'+CHAR(13)+CHAR(10)
+ELSE IF LOWER(LTRIM(RTRIM(@SortColumn))) = N'lastname desc' set @sql = @sql + ' ORDER BY LastName DESC'+CHAR(13)+CHAR(10)
+ELSE IF LOWER(LTRIM(RTRIM(@SortColumn))) = N'city' set @sql = @sql + ' ORDER BY City'+CHAR(13)+CHAR(10)
+ELSE IF LOWER(LTRIM(RTRIM(@SortColumn))) = N'city desc' set @sql = @sql + ' ORDER BY City DESC'+CHAR(13)+CHAR(10)
+ELSE
+BEGIN
+RAISERROR('T-Lift: value of @SortColumn is not in the sort whitelist.', 16, 1)
+RETURN
+END
+END
+```
+
+Calling the rendered procedure with `@SortColumn = N'CustomerID; DROP TABLE ...'` fails with a clear error — the value never reaches the SQL string. When `@SortColumn` is NULL, no ORDER BY is emitted at all.
+
 ---
 
 ## Variables vs. Parameters
@@ -698,6 +771,94 @@ No output is produced — just error messages if anything is off.
 
 ---
 
+## Deployment and Drift Detection
+
+Since version 1.10, T-Lift closes the render lifecycle: it can deploy for you, it stamps every render with traceability metadata, and it can tell you when a rendered procedure has gone stale.
+
+### Deploy directly with `@execute`
+
+```sql
+EXEC dbo.sp_tlift
+    @DatabaseName     = 'YourDatabase',
+    @ProcedureName    = 'SearchOrders',
+    @ProcedureNameNew = 'SearchOrders_TLift',
+    @execute          = 1;
+```
+
+With `@execute = 1`, T-Lift drops any existing target procedure(s) and creates the rendered version(s) directly in the target database — including wrapper mode, where the wrapper and all child procedures are deployed in one call. The deployment splitter is quote- and comment-aware, so `GO` inside string literals is handled correctly. After deployment, T-Lift verifies that every expected procedure exists and fails loudly if not.
+
+### The render metadata stamp
+
+Every rendered procedure now starts with a metadata block:
+
+```sql
+/* T-Lift:render
+TLiftVersion=01.10
+SourceSchema=dbo
+SourceProc=SearchOrders
+SourceHash=0x8A1B...
+RenderedUtc=2026-08-21T14:03:12.345
+*/
+```
+
+`SourceHash` is the SHA2-256 hash of the source procedure's definition at render time. The stamp travels with the deployed procedure (it is part of its definition), which makes renders traceable — and stale renders detectable.
+
+### Detect stale renders with `@checkDrift`
+
+The biggest operational risk with any generate-and-deploy workflow: someone changes the source procedure and forgets to re-render. `@checkDrift` finds exactly that.
+
+```sql
+EXEC dbo.sp_tlift
+    @DatabaseName = 'YourDatabase',
+    @checkDrift   = 1;
+```
+
+This scans the target database for all T-Lift-rendered procedures, recomputes the hash of each source procedure, and returns a report:
+
+| DriftStatus | Meaning |
+|---|---|
+| `OK` | Source unchanged since the render — the deployed version is current. |
+| `DRIFT` | The source procedure changed after rendering. Re-render (e.g. with `@execute = 1`). |
+| `SOURCE_MISSING` | The source procedure no longer exists. |
+
+Run it as a scheduled check or as a pipeline gate — it needs no bookkeeping tables, the stamp inside each rendered procedure is the single source of truth.
+
+---
+
+## Annotation Suggestions
+
+New to T-Lift, or facing a big legacy codebase? Let T-Lift find the candidates for you:
+
+```sql
+EXEC dbo.sp_tlift
+    @DatabaseName  = 'YourDatabase',
+    @ProcedureName = 'YourLegacyProcedure',
+    @suggest       = 1;
+```
+
+`@suggest = 1` scans an (unannotated) procedure for the classic catch-all patterns:
+
+- `(@param IS NULL OR column = @param)` — the textbook case, reported as `CATCH_ALL` with a concrete annotation recipe,
+- `ISNULL(@param, ...)` and `COALESCE(@param, ...)` around parameters — common disguises of the same problem, reported for manual review.
+
+The result set lists line numbers, the parameter involved, the offending line, and a suggested T-Lift annotation per finding. No rendering happens; the procedure is not modified.
+
+---
+
+## Permissions Note
+
+Like every dynamic SQL solution, T-Lift-rendered procedures break **ownership chaining**: inside `sp_executesql`, permissions are checked against the *caller* for the underlying tables. In a static procedure, `EXECUTE` permission on the procedure is enough; with dynamic SQL it is not.
+
+If you roll rendered procedures out to end users or restricted logins, plan for one of the usual patterns:
+
+- grant `SELECT` on the referenced tables/views to the callers (or a role),
+- create the rendered procedure with `EXECUTE AS OWNER`,
+- use module signing (certificate + `ADD SIGNATURE`) for fine-grained control.
+
+This is a property of dynamic SQL in SQL Server, not of T-Lift — but it belongs in every deployment checklist.
+
+---
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
@@ -712,6 +873,9 @@ No output is produced — just error messages if anything is off.
 | `@includeOurComments` | `BIT` | `0` | Include T-Lift's own comments in the output. |
 | `@includeDebug` | `BIT` | `1` | Include debug-related markers in the output. |
 | `@help` | `BIT` | `0` | Print usage information and exit. |
+| `@execute` | `BIT` | `0` | Deploy the rendered procedure(s) directly into the target database (drop + create, wrapper-aware). |
+| `@checkDrift` | `BIT` | `0` | Scan the target database for rendered procedures whose source changed since rendering. Returns a report; no rendering. `@ProcedureName` is not required in this mode. |
+| `@suggest` | `BIT` | `0` | Scan the procedure for catch-all patterns and return annotation suggestions. No rendering. |
 | `@Result` | `NVARCHAR(MAX) OUTPUT` | — | The rendered procedure as a string. |
 
 ---
@@ -728,7 +892,9 @@ No output is produced — just error messages if anything is off.
 
 There is plenty left to do. Among other things:
 
-- Automatic deployment option (`@execute` parameter to directly create the generated procedure)
+- Histogram-driven automatic bucket boundaries (`--#buckets @p: auto` based on `sys.dm_db_stats_histogram`)
+- A Query Store feedback loop that flags rendered procedures with plan regressions or unused buckets
+- Auto-rewrite mode for `@suggest` (emit a fully annotated copy of the source, not just findings)
 - Support for custom directive prefixes (currently `#` is hard-coded)
 - Extended validation and better error messages
 - Nested dynamic SQL sections
@@ -739,6 +905,7 @@ Feedback and contributions via GitHub issues are welcome.
 
 ## Version Log
 
+- **1.10** — Lifecycle package: `@execute` (direct deployment incl. wrapper mode, quote-aware batch splitter), render metadata stamp (`T-Lift:render` block with source hash), `@checkDrift` (stale-render report: OK / DRIFT / SOURCE_MISSING). New `--#sort` directive for whitelist-based safe dynamic ORDER BY. New `@suggest` mode that detects catch-all patterns (`IS NULL OR`, `ISNULL`, `COALESCE`) and proposes annotations. Internal: parameter metadata is no longer fetched via `INSERT ... EXEC`, so sp_tlift result sets (`@suggest`, `@checkDrift`) can be captured with `INSERT ... EXEC`. GitHub Actions CI running the integration suite against SQL Server 2017/2019/2022/2025 containers.
 - **1.02** - Fixed output parameter propagation from generated `sp_executesql` calls, directive scanning for `--#` tokens inside multiline string literals, and unknown directive validation so typos now fail instead of warning.
 - **1.01** — Named conditions (`--#define`), block removal (`--#{-` / `--#-}`), `--#{if` blocks inside dynamic SQL sections (empty line guard fix), improved condition handling in `--#if` / `--#{if` / `--#{elseif` with named condition resolution, unused condition warnings, removal block bracket validation
 - **1.00** — Else / else-if directives (`--#else`, `--#{elseif`), validation mode (`@validateOnly`), wrapper procedure generation (`--#wrapper`, `--#branch`), recompile hint (`--#recompile`), comment-out directive (`--#c`), bucket-based plan cache segmentation (`--#buckets`), unknown directive detection, bracket matching validation, TRY/CATCH error handling, safe procedure rename, SQL 2022+ ordinal support
