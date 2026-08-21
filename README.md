@@ -7,6 +7,8 @@ T-Lift is a T-SQL precompiler that lets developers use directive-based meta-code
 Written entirely in T-SQL. Ships as a single stored procedure (`sp_tlift`).
 
 ---
+![T-Lift renders a catch-all procedure into parameterized dynamic SQL](media/tlift.gif)
+---
 
 ## Table of Contents
 
